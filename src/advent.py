@@ -33,10 +33,11 @@ class AdventProblem(ABC):
 
 class Day1(AdventProblem):
 
-    def __init__(self):
+    def __init__(self, test: bool):
 
         super().__init__('do the submarine soundings increase?')
-        self.sounding_lines = open('day1_soundings.txt', 'r').readlines()
+        soundings_file = 'day1_test.txt' if test else 'day1_soundings.txt'
+        self.sounding_lines = open(soundings_file, 'r').readlines()
 
     def solve_part1(self) -> str:
 
@@ -69,10 +70,11 @@ class Day1(AdventProblem):
 
 class Day2(AdventProblem):
 
-    def __init__(self):
+    def __init__(self, test: bool):
 
         super().__init__('find the submarine path')
-        self.direction_lines = open('day2_directions.txt', 'r').readlines()
+        directions_file = 'day2_test.txt' if test else 'day2_directions.txt'
+        self.direction_lines = open(directions_file, 'r').readlines()
 
     def solve_part1(self) -> None:
         horz, vert = 0, 0
@@ -106,10 +108,10 @@ class Day2(AdventProblem):
         return f'depth * horz: {depth * horz}'
 
 
-def run_day(day: int) -> None:
+def run_day(day: int, test: bool) -> None:
     module = importlib.import_module('advent')
     class_ = getattr(module, f'Day{day}')
-    instance: AdventProblem = class_()
+    instance: AdventProblem = class_(test)
     print(f'Now solving Day {day} "{instance.name}":')
     print(f'Part 1 - {instance.solve_part1()}')
     print(f'Part 2 - {instance.solve_part2()}')
@@ -118,7 +120,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser("advent.py")
 
     parser.add_argument(dest='day', help='which day to run')
+    parser.add_argument('-t', '--test', dest='test', help='run the output on the test data',
+                        action="store_true")
+    parser.set_defaults(test=False)
 
     args = parser.parse_args()
 
-    run_day(args.day)
+    run_day(args.day, args.test)
