@@ -2,6 +2,9 @@ from abc import ABC, abstractmethod
 import importlib
 import argparse
 
+import numpy as np
+
+
 class AdventProblem(ABC):
 
     """
@@ -107,6 +110,56 @@ class Day2(AdventProblem):
 
         return f'depth * horz: {depth * horz}'
 
+class Day3(AdventProblem):
+
+    def __init__(self, test: bool):
+        super().__init__('')
+        bits_file = 'day3_test.txt' if test else 'day3_binary.txt'
+        self.bits_lines = open(bits_file, 'r').readlines()
+        self.nlines = len(self.bits_lines)
+        self.nbits = len(self.bits_lines[0].strip())
+        self.bits = np.zeros((self.nbits,self.nlines),dtype=int)
+        for line_num, line in enumerate(self.bits_lines):
+            for num in range(self.nbits):
+                self.bits[num,line_num] = line[num].strip()
+
+        self.num0 = np.sum(self.bits == 0, axis=1)
+        self.num1 = np.sum(self.bits == 1, axis=1)
+        self.gamma = np.zeros(self.nbits, dtype=int)
+        self.epsilon = np.zeros(self.nbits, dtype=int)
+        for i in range(self.nbits):
+            self.gamma[i] = 0 if self.num0[i] > self.num1[i] else 1
+            self.epsilon[i] = 0 if self.num0[i] <= self.num1[i] else 1
+
+    def solve_part1(self) -> None:
+        gamma_num = self.gamma.dot(2**np.arange(self.gamma.size)[::-1])
+        epsilon_num = self.epsilon.dot(2**np.arange(self.gamma.size)[::-1])
+
+        return f'{gamma_num*epsilon_num}'
+
+    def solve_part2(self) -> None:
+        o2_possibles = np.ones(self.nlines, dtype=bool)
+        co2_possibles = np.ones(self.nlines, dtype=bool)
+        for i in range(self.nbits):
+            num0_o2 = np.sum(self.bits[i,o2_possibles] == 0)
+            num1_o2 = np.sum(self.bits[i,o2_possibles] == 1)
+            num0_co2 = np.sum(self.bits[i,co2_possibles] == 0)
+            num1_co2 = np.sum(self.bits[i,co2_possibles] == 1)
+            o2_val = 1 if num1_o2 >= num0_o2 else 0
+            co2_val = 0 if num0_co2 <= num1_co2 else 1
+            if sum(o2_possibles) > 1:
+                o2_possibles[o2_possibles] = \
+                    o2_possibles[o2_possibles] & self.bits[i,o2_possibles] == o2_val
+            if sum(co2_possibles) > 1:
+                co2_possibles[co2_possibles] = \
+                    co2_possibles[co2_possibles] & self.bits[i,co2_possibles] == co2_val
+
+        oxygen_rating = self.bits[:,o2_possibles].transpose()
+        o2_rating_num = oxygen_rating.dot(2**np.arange(oxygen_rating.size)[::-1])
+        co2_rating = self.bits[:,co2_possibles].transpose()
+        co2_rating_num = co2_rating.dot(2**np.arange(co2_rating.size)[::-1])
+
+        return f'{o2_rating_num*co2_rating_num}'
 
 def run_day(day: int, test: bool) -> None:
     module = importlib.import_module('advent')
