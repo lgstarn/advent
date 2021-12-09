@@ -1,8 +1,9 @@
-import copy
-from abc import ABC, abstractmethod
-import importlib
 import argparse
-from typing import List, Optional
+import copy
+import importlib
+from abc import ABC, abstractmethod
+from typing import List
+from skimage.morphology import flood_fill
 
 import numpy as np
 
@@ -314,6 +315,136 @@ class Day7(AdventProblem):
             diff = np.abs(self.pos - i)
             min_fuel = min(min_fuel, np.round(np.sum(diff*(diff+1)//2)))
         return f'{min_fuel}'
+
+
+class Day8(AdventProblem):
+
+    def __init__(self, test: bool):
+        super().__init__('Scrambled digits')
+        input_file = 'day8_test.txt' if test else 'day8_input.txt'
+        input_lines = open(input_file, 'r').readlines()
+        self.in_digit_sets_list, self.out_digit_sets_list = [], []
+        for input_line in input_lines:
+            in_str, out_str = input_line.split('|')
+            self.in_digit_sets_list.append([set(x) for x in in_str.strip().split()])
+            self.out_digit_sets_list.append([set(x) for x in out_str.strip().split()])
+
+        self.len_to_digit = dict({
+            2: 1,
+            3: 7,
+            4: 4,
+            7: 8
+        })
+
+    def solve_part1(self) -> str:
+        num = 0
+        for i in range(len(self.out_digit_sets_list)):
+            for out_digit_set in self.out_digit_sets_list[i]:
+                sl = len(out_digit_set)
+                if sl in (2,3,4,7):
+                    num = num + 1
+        return f'{num}'
+
+    def solve_part2(self) -> str:
+        num = 0
+
+        for i in range(len(self.out_digit_sets_list)):
+            digit_sets = {}
+
+            for pass_num in range(3):
+                # find 1, 4, 7, 8
+                for in_digit_set in self.in_digit_sets_list[i]:
+                    in_len = len(in_digit_set)
+                    if in_len in self.len_to_digit:
+                        digit_int = self.len_to_digit[in_len]
+                        digit_sets[digit_int] = in_digit_set
+
+                # find 2, 3, 5
+                for in_digit_set in self.in_digit_sets_list[i]:
+                    in_len = len(in_digit_set)
+                    if in_len == 5:
+                        if in_digit_set.intersection(digit_sets[1]) == digit_sets[1]:
+                            digit_sets[3] = in_digit_set
+                        elif len(in_digit_set.intersection(digit_sets[4])) == 3:
+                            digit_sets[5] = in_digit_set
+                        else:
+                            digit_sets[2] = in_digit_set
+
+                # to find 0, 6, 9
+                for in_digit_set in self.in_digit_sets_list[i]:
+                    in_len = len(in_digit_set)
+                    if in_len == 6:
+                        if in_digit_set.intersection(digit_sets[3]) == digit_sets[3]:
+                            digit_sets[9] = in_digit_set
+                        elif in_digit_set.intersection(digit_sets[1]) == digit_sets[1]:
+                            digit_sets[0] = in_digit_set
+                        else:
+                            digit_sets[6] = in_digit_set
+
+            # flip the keys and tokens
+            str_digits = {}
+            for digit_int, digit_set in digit_sets.items():
+                str_digits[''.join(sorted(digit_set))] = digit_int
+
+            out_num_str = ''
+            for out_digit_str in self.out_digit_sets_list[i]:
+                out_num_str += str(str_digits[''.join(sorted(out_digit_str))])
+
+            num += int(out_num_str)
+
+        return f'{num}'
+
+
+class Day9(AdventProblem):
+
+    def __init__(self, test: bool):
+        super().__init__('Cave map')
+        map_file = 'day9_test.txt' if test else 'day9_map.txt'
+        map_lines = open(map_file, 'r').readlines()
+        self.cave_map = None
+        self.ny = len(map_lines)
+        for i, map_line in enumerate(map_lines):
+            if self.cave_map is None:
+                self.nx = len(map_line.strip())
+                self.cave_map = np.zeros((self.nx, self.ny), dtype=int)
+            self.cave_map[:,i] = [x for x in list(map_line.strip())]
+
+    def get_lower_comparison(self) -> np.ndarray:
+        lower = np.ones((self.nx, self.ny), dtype=bool)
+        lower[1:,:] = lower[1:,:] & (self.cave_map[1:,:] < self.cave_map[:-1,:])
+        lower[:-1,:] = lower[:-1,:] & (self.cave_map[:-1, :] < self.cave_map[1:, :])
+        lower[:,1:] = lower[:,1:] & (self.cave_map[:,1:] < self.cave_map[:,:-1])
+        lower[:,:-1] = lower[:,:-1] & (self.cave_map[:,:-1] < self.cave_map[:,1:])
+
+        return lower
+
+    def solve_part1(self) -> str:
+        return f'{np.sum(self.cave_map[self.get_lower_comparison()]+1)}'
+
+    def mark_basin(self, ind, x, y, basins):
+        if x < 0 or x >= self.nx or y < 0 or y >= self.ny or basins[x,y] == -1 or basins[x,y] == ind:
+            return
+
+        basins[x,y] = ind
+        self.mark_basin(ind, x + 1, y, basins)
+        self.mark_basin(ind, x - 1, y, basins)
+        self.mark_basin(ind, x, y + 1, basins)
+        self.mark_basin(ind, x, y - 1, basins)
+
+    def solve_part2(self) -> str:
+        lower = self.get_lower_comparison()
+        lowest_pts = self.cave_map[lower]
+        lowest_inds = np.where(lower)
+        basins = -2*np.ones((self.nx, self.ny), dtype=int)
+        basins[self.cave_map == 9] = -1
+        nbasins = np.zeros(len(lowest_pts),dtype=int)
+
+        for ind in range(len(lowest_pts)):
+            self.mark_basin(ind, lowest_inds[0][ind], lowest_inds[1][ind], basins)
+            nbasins[ind] = np.sum(basins == ind)
+
+        num = np.prod(np.sort(nbasins)[-3:])
+        return f'{num}'
 
 
 def run_day(day: int, test: bool) -> None:
