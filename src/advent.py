@@ -5,6 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple
 
+import networkx as netx
 import numpy as np
 
 
@@ -799,6 +800,161 @@ class Day14(AdventProblem):
         counts = sorted(letter_counts.values())
 
         return f'{counts[-1] - counts[0]}'
+
+
+class Day15(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Chiton path')
+        graph_file = 'day15_test.txt' if test else 'day15_graph.txt'
+        graph_lines = open(graph_file, 'r').readlines()
+        self.graph = None
+        self.stencil = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+
+        for i, graph_line in enumerate(graph_lines):
+            graph_line = graph_line.strip()
+            if self.graph is None:
+                self.nx = len(graph_line)
+                self.graph = np.zeros((self.nx,self.nx), dtype=int)
+
+            for j, graph_val in enumerate(graph_line):
+                self.graph[i, j] = int(graph_val)
+
+    def solve_part1(self) -> str:
+        graph = netx.DiGraph()
+        for i in range(self.nx):
+            for j in range(self.nx):
+                for stencil in self.stencil:
+                    i_, j_ = i + stencil[0], j + stencil[1]
+                    if 0 <= i_ < self.nx and 0 <= j_ < self.nx:
+                        graph.add_edge((i,j), (i_,j_), weight=self.graph[i_, j_])
+
+        dist = netx.shortest_path_length(graph, source=(0,0), target=(self.nx-1, self.nx-1),
+                                         weight = 'weight')
+
+        return f'{dist}'
+
+    def solve_part2(self) -> str:
+        ntile = 5
+        nxp = ntile*self.nx
+        graph_tiled = np.zeros((nxp, nxp), dtype=int)
+        graph = netx.DiGraph()
+        for xtile in range(ntile):
+            for ytile in range(ntile):
+                xs, ys = xtile * self.nx, ytile * self.nx
+                xe, ye = (xtile+1)* self.nx, (ytile+1) * self.nx
+                z_offset = xtile + ytile
+                graph_tiled[xs:xe, ys:ye] = (self.graph + z_offset - 1) % 9 + 1
+
+        for i in range(nxp):
+            for j in range(nxp):
+                for stencil in self.stencil:
+                    i_, j_ = i + stencil[0], j + stencil[1]
+                    if 0 <= i_ < nxp and 0 <= j_ < nxp:
+                        graph.add_edge((i, j), (i_, j_), weight=graph_tiled[i_, j_])
+
+        dist = netx.shortest_path_length(graph, source=(0,0), target=(nxp-1, nxp-1),
+                                         weight = 'weight')
+
+        return f'{dist}'
+
+
+class BitsTree:
+    def __init__(self):
+        self.children: List['BitsTree'] = []
+        self.literal: int = None
+        self.version: int = None
+        self.type: int = None
+
+    def parse(self, bits: str) -> int:
+        self.version, self.type = int(bits[0:3],2), int(bits[3:6],2)
+
+        cursor = 6
+        if self.type == 4: # literal string
+            lit_str, has_more = '', True
+            while has_more:
+                next_five = bits[cursor:cursor+5]
+                has_more = next_five[0] == '1'
+                lit_str += next_five[1:]
+                cursor = cursor + 5
+            self.literal = int(lit_str,2)
+        else: # operator
+            length_type = int(bits[cursor:cursor+1], 2)
+            cursor += 1
+            if length_type == 0:
+                num_bits = int(bits[cursor:cursor+15],2)
+                cursor += 15
+                tot_parsed = 0
+                while tot_parsed != num_bits:
+                    sub = BitsTree()
+                    num_parsed = sub.parse(bits[cursor:])
+                    tot_parsed += num_parsed
+                    cursor += num_parsed
+                    self.children.append(sub)
+            else:
+                num_packets, num_parsed = int(bits[cursor:cursor + 11], 2), 0
+                cursor += 11
+                while num_parsed != num_packets:
+                    sub = BitsTree()
+                    cursor += sub.parse(bits[cursor:])
+                    self.children.append(sub)
+                    num_parsed += 1
+
+        return cursor
+
+    def operate(self) -> int:
+        if self.type == 4:
+            retval = self.literal
+        elif self.type == 0:
+            retval = 0
+            for child in self.children:
+                retval += child.operate()
+        elif self.type == 1:
+            retval = 1
+            for child in self.children:
+                retval *= child.operate()
+        elif self.type == 2:
+            retval = np.inf
+            for child in self.children:
+                retval = min(retval, child.operate())
+        elif self.type == 3:
+            retval = -np.inf
+            for child in self.children:
+                retval = max(retval, child.operate())
+        elif self.type == 5:
+            assert len(self.children) == 2
+            retval = 1 if self.children[0].operate() > self.children[1].operate() else 0
+        elif self.type == 6:
+            assert len(self.children) == 2
+            retval = 1 if self.children[0].operate() < self.children[1].operate() else 0
+        elif self.type == 7:
+            assert len(self.children) == 2
+            retval = 1 if self.children[0].operate() == self.children[1].operate() else 0
+        else:
+            raise ValueError(f'Unknown type {self.type}')
+
+        return retval
+
+    @property
+    def version_sum(self) -> int:
+        vsum = self.version
+        for child in self.children:
+            vsum += child.version_sum
+        return vsum
+
+class Day16(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('BITS')
+        bits_file = 'day16_test.txt' if test else 'day16_bits.txt'
+        bits_hex = open(bits_file, 'r').readlines()[0].strip()
+        bits_bin = ''.join([bin(int(x,16))[2:].zfill(4) for x in bits_hex])
+        self.root = BitsTree()
+        self.root.parse(bits_bin)
+
+    def solve_part1(self) -> str:
+        return f'{self.root.version_sum}'
+
+    def solve_part2(self) -> str:
+        return f'{self.root.operate()}'
 
 
 def run_day(day: int, test: bool) -> None:
