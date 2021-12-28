@@ -1,12 +1,19 @@
 import argparse
 import copy
 import importlib
+import itertools
+import re
 import time
 from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple
+from collections import namedtuple, Counter
+from math import floor, ceil, inf
+from typing import List, Dict, Tuple, Optional, Union, Set, Any
+import heapq
 
 import networkx as netx
 import numpy as np
+from scipy.signal import convolve2d
+from scipy.spatial import KDTree
 
 
 class AdventProblem(ABC):
@@ -218,6 +225,8 @@ class Day4(AdventProblem):
     def solve_part2(self) -> str:
         for board in self.boards:
             board.reset()
+
+        last_board, last_number = None, None
 
         for number in self.bingo:
             for board in self.boards:
@@ -859,16 +868,17 @@ class Day15(AdventProblem):
 
 
 class BitsTree:
-    def __init__(self):
+    def __init__(self, depth: int = 0):
         self.children: List['BitsTree'] = []
-        self.literal: int = None
+        self.literal: int = None,
         self.version: int = None
         self.type: int = None
+        self.depth = depth
 
-    def parse(self, bits: str) -> int:
+    def parse(self, bits: str) -> Tuple[int, int]:
         self.version, self.type = int(bits[0:3],2), int(bits[3:6],2)
-
         cursor = 6
+
         if self.type == 4: # literal string
             lit_str, has_more = '', True
             while has_more:
@@ -885,7 +895,7 @@ class BitsTree:
                 cursor += 15
                 tot_parsed = 0
                 while tot_parsed != num_bits:
-                    sub = BitsTree()
+                    sub = BitsTree(self.depth+1)
                     num_parsed = sub.parse(bits[cursor:])
                     tot_parsed += num_parsed
                     cursor += num_parsed
@@ -894,7 +904,7 @@ class BitsTree:
                 num_packets, num_parsed = int(bits[cursor:cursor + 11], 2), 0
                 cursor += 11
                 while num_parsed != num_packets:
-                    sub = BitsTree()
+                    sub = BitsTree(self.depth+1)
                     cursor += sub.parse(bits[cursor:])
                     self.children.append(sub)
                     num_parsed += 1
@@ -941,6 +951,14 @@ class BitsTree:
             vsum += child.version_sum
         return vsum
 
+    @property
+    def max_depth(self) -> int:
+        vmax = self.depth
+        for child in self.children:
+            vmax = max(vmax, child.max_depth)
+        return vmax
+
+
 class Day16(AdventProblem):
     def __init__(self, test: bool):
         super().__init__('BITS')
@@ -951,10 +969,1357 @@ class Day16(AdventProblem):
         self.root.parse(bits_bin)
 
     def solve_part1(self) -> str:
-        return f'{self.root.version_sum}'
+        return f'{self.root.version_sum} (max depth: {self.root.max_depth})'
 
     def solve_part2(self) -> str:
         return f'{self.root.operate()}'
+
+
+class Day17(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Trick shot')
+        target_file = 'day17_test.txt' if test else 'day17_target.txt'
+        target_area = open(target_file, 'r').readlines()[0].strip()
+        _, xy_range = target_area.split('target area: x=')
+        x_range, y_range = xy_range.split(', y=')
+        x_lower, x_upper = x_range.split('..')
+        y_lower, y_upper = y_range.split('..')
+        self.x_range = (int(x_lower), int(x_upper))
+        self.y_range = (int(y_lower), int(y_upper))
+
+    def valid_vxs(self) -> Tuple[int, int]:
+        lower, upper = self.x_range
+        vx, min_vx = 0, -np.inf
+        for vx in range(lower + 1):
+            x = vx * (vx + 1) / 2
+            if lower <= x <= upper:
+                min_vx = vx
+                break
+
+        max_vx = upper + 1  # guaranteed to be too fast
+        return min_vx, max_vx
+
+    def valid_vys(self):
+        lower, upper = self.y_range
+        return lower, abs(lower)
+
+    def ends_in_target(self, vx: int, vy: int) -> Tuple[bool, int]:
+        impossibru = False
+        x, y = 0, 0
+        xstart, xend = self.x_range
+        ystart, yend = self.y_range
+        max_y = -np.inf
+        while not impossibru:
+            x += vx
+            y += vy
+
+            max_y = max(max_y, y)
+            if xstart <= x <= xend and ystart <= y <= yend:
+                return True, max_y
+
+            vx = max(vx - 1, 0)
+            vy -= 1
+
+            if x > xend or y < ystart:
+                impossibru = True
+        return False, max_y
+
+    def solve_part1(self) -> str:
+        min_vx, max_vx = self.valid_vxs()
+        min_vy, max_vy = self.valid_vys()
+        max_y = -np.inf
+        for vy in range(min_vy, max_vy):
+            for vx in range(min_vx, max_vx):
+                valid, max_y_ = self.ends_in_target(vx, vy)
+                if valid:
+                    if max_y_ > max_y:
+                        max_y = max_y_
+
+        return f'{max_y}'
+
+    def solve_part2(self) -> str:
+        min_vx, max_vx = self.valid_vxs()
+        min_vy, max_vy = self.valid_vys()
+        valid_vxvys = 0
+        for vy in range(min_vy, max_vy):
+            for vx in range(min_vx, max_vx):
+                valid, _ = self.ends_in_target(vx, vy)
+                if valid:
+                    valid_vxvys += 1
+
+        return f'{valid_vxvys}'
+
+
+class SnailfishTree:
+    def __init__(self, val: Optional[int] = None, depth: int = 0):
+        self.left, self.right, self.parent = None, None, None
+        self.val, self.depth = val, depth
+
+    def parse(self, instr: Union[List, int], depth: int = 0,
+              parent: Optional['SnailfishTree'] = None) -> None:
+        self.depth = depth
+        self.parent = parent
+        if isinstance(instr, List):
+            self.left = SnailfishTree()
+            self.left.parse(instr[0], depth + 1, self)
+            self.right = SnailfishTree()
+            self.right.parse(instr[1], depth + 1, self)
+        else:
+            self.val = instr
+
+    def increment_depth(self) -> None:
+        self.depth += 1
+        if self.left is not None:
+            self.left.increment_depth()
+        if self.right is not None:
+            self.right.increment_depth()
+
+    def flatten_to_list(self, to_add: List['SnailfishTree']):
+        if self.val is not None:
+            to_add.append(self)
+        else:
+            self.left.flatten_to_list(to_add)
+            self.right.flatten_to_list(to_add)
+
+    def get_right(self, list_of_nodes: List['SnailfishTree']) -> 'SnailfishTree':
+        ind = list_of_nodes.index(self)
+        return list_of_nodes[ind + 1] if ind + 1 < len(list_of_nodes) else None
+
+    def get_left(self, list_of_nodes: List['SnailfishTree']) -> 'SnailfishTree':
+        ind = list_of_nodes.index(self)
+        return list_of_nodes[ind - 1] if ind > 0 else None
+
+    def needs_explosion(self) -> bool:
+        return self.depth > 4
+
+    def needs_split(self) -> bool:
+        return self.val is not None and self.val >= 10
+
+    def explode(self, list_of_nodes: List['SnailfishTree']) -> None:
+        l, r = self.left.val, self.right.val
+
+        right_neighbor = self.right.get_right(list_of_nodes)
+        if right_neighbor is not None:
+            right_neighbor.val += r
+
+        left_neighbor = self.left.get_left(list_of_nodes)
+        if left_neighbor is not None:
+            left_neighbor.val += l
+
+        self.val, self.left, self.right = 0, None, None
+
+    def split(self):
+        assert self.val is not None
+        assert self.right is None
+        assert self.left is None
+        cur_val = self.val
+        self.val = None
+        self.left = SnailfishTree(floor(cur_val / 2))
+        self.right = SnailfishTree(ceil(cur_val / 2))
+        self.left.parent = self
+        self.right.parent = self
+        self.left.depth = self.depth + 1
+        self.right.depth = self.depth + 1
+        # fin
+
+    @property
+    def magnitude(self) -> int:
+        # The magnitude of a pair is 3 times the magnitude of its left element plus
+        # 2 times the magnitude of its right element. The magnitude of a regular
+        # number is just that number.
+        if self.val is not None:
+            return self.val
+        else:
+            return 3 * self.left.magnitude + 2 * self.right.magnitude
+
+    def __repr__(self) -> str:
+        if self.val is not None:
+            return f'{self.val}'
+        else:
+            return f'[{self.left},{self.right}]'
+
+    def __add__(self, other: 'SnailfishTree') -> 'SnailfishTree':
+        assert self.depth == other.depth == 0
+        parent = SnailfishTree()
+        parent.depth = self.depth
+        parent.left = self
+        parent.right = other
+        parent.left.increment_depth()
+        parent.right.increment_depth()
+        self.parent = other.parent = parent
+        return parent
+
+    def to_list(self) -> List[int]:
+        if self.parent is None:
+            return self.left.to_list() + self.right.to_list()
+        elif self.val is None:
+            return [self.left.to_list() + self.right.to_list()]
+        else:
+            return [self.val]
+
+    def get_max_depth(self, maxd: int) -> int:
+        if self.val is not None:
+            return max(maxd, self.depth)
+        else:
+            return max(self.left.get_max_depth(maxd), self.right.get_max_depth(maxd))
+
+    def reduce(self) -> bool:
+        flattened_list = []
+        self.flatten_to_list(flattened_list)
+        # max_depth = self.get_max_depth(-np.inf)
+        for leaf in flattened_list:
+            if leaf.depth > 4:
+                leaf.parent.explode(flattened_list)
+                return True
+
+        for leaf in flattened_list:
+            if leaf.val >= 10:
+                leaf.split()
+                return True
+
+        return False
+
+
+class Day18(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Snailfish tree/list')
+        data_file = 'day18_test.txt' if test else 'day18_trees.txt'
+        data_lines = open(data_file, 'r').readlines()
+        self.root_trees = []
+        for data_line in data_lines:
+            arr = eval(data_line.strip())
+            root_tree = SnailfishTree()
+            root_tree.parse(arr)
+            self.root_trees.append(root_tree)
+
+    def solve_part1(self) -> str:
+        end_tree = copy.deepcopy(self.root_trees[0])
+        for root_tree in self.root_trees[1:]:
+            while end_tree.reduce():
+                pass
+            while root_tree.reduce():
+                pass
+            end_tree = end_tree + copy.deepcopy(root_tree)
+
+        while end_tree.reduce():
+            pass
+
+        return f'{end_tree.magnitude}'
+
+    def solve_part2(self) -> str:
+        max_mag = -np.inf
+        for i in range(len(self.root_trees)):
+            for j in range(len(self.root_trees)):
+                if i != j:
+                    tree1 = copy.deepcopy(self.root_trees[i])
+                    tree2 = copy.deepcopy(self.root_trees[j])
+                    out = tree1 + tree2
+                    while out.reduce():
+                        pass
+
+                    max_mag = max(max_mag, out.magnitude)
+
+        return f'{max_mag}'
+
+
+class ScannerRotation:
+    def __init__(self, x_flip: bool, y_flip: bool, z_flip: bool, permutation: Tuple[int,int,int]):
+        self.x_sign = -1 if x_flip else 1
+        self.y_sign = -1 if y_flip else 1
+        self.z_sign = -1 if z_flip else 1
+        self.permutation = permutation
+
+    def rotate(self, points: np.ndarray) -> np.ndarray:
+        # permute the columns
+        new_array = points[:, self.permutation]
+        # flip the signs
+        new_array[:,0] *= self.x_sign
+        new_array[:,1] *= self.y_sign
+        new_array[:,2] *= self.z_sign
+        return new_array
+
+    def compose(self, other: 'ScannerRotation') -> 'ScannerRotation':
+        x_flip = self.x_sign * other.x_sign == -1
+        y_flip = self.y_sign * other.y_sign == -1
+        z_flip = self.z_sign * other.z_sign == -1
+        other_permutation = list(other.permutation)
+        permutation = tuple(other_permutation[i] for i in list(self.permutation))
+        return ScannerRotation(x_flip, y_flip, z_flip, permutation)
+
+
+class Scanner:
+    def __init__(self, scanner_number: int, list_of_points: List[List[int]]):
+        self.scanner_number = scanner_number
+        self.beacons = np.array(list_of_points)
+        # self.dist_mat = distance_matrix(self.beacons, self.beacons)
+        self.offset = np.array([0,0,0])
+
+    def check_for_consistent_offset(self, other: 'Scanner', rotation: np.ndarray) -> Tuple[bool, np.ndarray]:
+        rot_beacons = (rotation @ other.beacons.T).T
+        offset_map = {}
+
+        for i in range(self.beacons.shape[0]):
+            offsets = rot_beacons - self.beacons[i, :]
+            for offset_num in range(offsets.shape[0]):
+                offset = tuple(offsets[offset_num, :])
+                if offset not in offset_map:
+                    offset_map[offset] = 0
+                offset_map[offset] += 1
+
+        # get out the counts, see if any are more than 12
+        list_vals = list(offset_map.values())
+        list_inds = list(offset_map)
+        correct_inds = np.where(np.array(list_vals) >= 12)
+        if len(correct_inds) > 1:
+            raise Exception('double inds!')
+        correct_ind = correct_inds[0]
+        found_offset = len(correct_ind) > 0
+        correct_offset = list_inds[correct_ind[0]] if found_offset else None
+        if found_offset:
+            other.offset = np.array(correct_offset)
+        return found_offset, correct_offset
+
+    def add_new_points(self, other: 'Scanner', offset: np.ndarray, rotation: np.ndarray):
+        rot_and_trans = (rotation @ other.beacons.T).T - offset
+        to_include = []
+        for ii,point in enumerate(rot_and_trans):
+            contains = list(point) in self.beacons.tolist()
+            to_include.append(not contains)
+        self.beacons = np.append(self.beacons, rot_and_trans[to_include,:], axis=0)
+
+    def __repr__(self):
+        ret_val = f'--- scanner {self.scanner_number} ---\n'
+        for i in range(self.beacons.shape[0]):
+            for j in range(self.beacons.shape[1]):
+                ret_val += (',' if j > 0 else '') + str(self.beacons[i,j])
+            ret_val += '\n'
+        return ret_val
+
+
+class Day19(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Scanners and beacons')
+        sensor_file = 'day19_test.txt' if test else 'day19_sensors.txt'
+        sensor_lines = open(sensor_file, 'r').readlines()
+        self.scanners = []
+        scanner_beacons: List[List[int]] = []
+        ii_scan = -1
+        for sensor_line in sensor_lines:
+            if '---' in sensor_line:
+                ii_scan += 1
+                scanner_beacons.append([])
+            elif len(sensor_line.strip()) != 0:
+                scanner_beacons[ii_scan].append([int(x) for x in sensor_line.split(",")])
+        for scanner in scanner_beacons:
+            self.scanners.append(Scanner(len(self.scanners), scanner))
+        self.to_check = None
+
+    def largest_distance(self):
+        maxdist = -np.inf
+        for ii,x in enumerate(self.scanners):
+            for y in self.scanners[ii:]:
+                maxdist = max(np.linalg.norm(x.offset-y.offset,ord=1),maxdist)
+        return maxdist
+
+    @classmethod
+    def run_icp(cls, target: Scanner, other: Scanner) -> Tuple[bool, np.ndarray, np.ndarray]:
+        steps, converged = 0, False
+        target_kdt = KDTree(target.beacons)
+        offset, rotation = np.array([0, 0, 0]), ScannerRotation(False, False, False, [0,1,2])
+        rot_trans_beacons = other.beacons
+        while not converged and steps < 5:
+            _, inds = target_kdt.query(rot_trans_beacons, p=1)
+            # centroid = np.round(np.mean(diff, axis=0))
+            for x_flip, y_flip, z_flip in itertools.product([False, True], repeat=3):
+                for permutation in itertools.permutations(range(3)):
+                    new_rotation = ScannerRotation(x_flip, y_flip, z_flip, permutation)
+                    # new_beacons = new_rotation.rotate(rot_trans_beacons) - centroid
+                    # new_diff = target.beacons[inds, :] - new_beacons
+            # find the rotation that minimizes the distance
+            steps += 1
+        pass
+
+    @classmethod
+    def scan_list(cls, target: Scanner, to_be_scanned: Set[Scanner]) -> Set[Scanner]:
+        to_remove = set()
+
+        for scanner in to_be_scanned:
+            converged, offset, rotation = cls.run_icp(target, scanner)
+            if converged:
+                target.add_new_points(scanner, offset, rotation)
+                to_remove |= {scanner}
+
+        return to_be_scanned - to_remove
+
+    def solve_part1(self) -> str:
+        to_check = copy.deepcopy(self.scanners[0])
+        to_scan = set(self.scanners[1:])
+
+        while len(to_scan) > 0:
+            to_scan = self.scan_list(to_check, to_scan)
+
+        self.to_check = to_check
+
+        return f'{to_check.beacons.shape[0]}'
+
+    def solve_part2(self) -> str:
+        return f'{self.largest_distance()}'
+
+
+class InfiniteImageConvolver:
+    def __init__(self, state: np.ndarray, rule: np.ndarray):
+        self.state, self.rule, self.boundary_value = state, rule, 0
+        self.vision = 2 ** (np.arange(9).reshape((3, 3)))
+        self.vfunc = np.vectorize(lambda x: self.rule[x])
+
+    def __repr__(self):
+        ret_val = ''
+        for i in range(self.state.shape[0]):
+            for j in range(self.state.shape[1]):
+                ret_val += '#' if self.state[i, j] else '.'
+            ret_val += '\n'
+        return ret_val
+
+    def update(self):
+        self.state = self.vfunc(convolve2d(self.state, self.vision, mode='full', boundary='fill',
+                                           fillvalue=self.boundary_value))
+        self.boundary_value = int(self.rule[self.boundary_value * 511])
+
+
+class Day20(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Infinite images')
+        image_file = 'day20_test.txt' if test else 'day20_image.txt'
+        image_lines = open(image_file, 'r').readlines()
+
+        algo_mode = True
+
+        self.algorithm: List[int] = None
+        self.image: np.ndarray = None
+        image_list: List[List[int]] = []
+
+        for image_line in image_lines:
+            if algo_mode:
+                self.algorithm = [True if x == '#' else False for x in image_line.strip()]
+                algo_mode = False
+            elif len(image_line.strip()) > 0:
+                image_list.append([True if x == '#' else False for x in image_line.strip()])
+
+        self.image = np.array(image_list, dtype=bool)
+        self.twerker = InfiniteImageConvolver(self.image, self.algorithm)
+
+    def solve_part1(self) -> str:
+        for _ in range(2):
+            self.twerker.update()
+
+        return f'{np.sum(self.twerker.state)}'
+
+    def solve_part2(self) -> str:
+        for _ in range(2, 50):
+            self.twerker.update()
+
+        return f'{np.sum(self.twerker.state)}'
+
+
+class Die(ABC):
+    def __init__(self):
+        self.roll_count = 0
+
+    def do_roll(self) -> int:
+        self.roll_count += 1
+        return self.get_roll()
+
+    @abstractmethod
+    def get_roll(self) -> int:
+
+        """
+        Get the value of the roll
+        """
+
+
+class DeterministicDie(Die):
+    def __init__(self):
+        super().__init__()
+        self.num = 0
+
+    def get_roll(self) -> int:
+        self.num += 1
+        if self.num > 100:
+            self.num = 1
+        return self.num
+
+
+class Player:
+    def __init__(self, num: int, location: int):
+        self.num = num
+        self.location = location
+        self.score = 0
+
+    def move_roll(self, die):
+        rolls: List[int] = []
+        for _ in range(3):
+            rolls.append(die.do_roll())
+
+        result = sum(rolls)
+        new_location = ((self.location + result - 1) % 10) + 1
+        self.score += new_location
+        self.location = new_location
+
+    def check_for_win(self):
+        return self.score >= 1000
+
+
+WorldState = namedtuple('WorldState', ['p1_loc', 'p1_score', 'p2_loc', 'p2_score'])
+
+
+class Day21(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Dirac Dice')
+        sensor_file = 'day21_test.txt' if test else 'day21_positions.txt'
+        sensor_lines = open(sensor_file, 'r').read()
+        (_, p1_start), (_, p2_start) = re.findall("Player (\d+) starting position: (\d+)",
+                                                  sensor_lines)
+        self.players = [Player(1, location=int(p1_start)), Player(2, location=int(p2_start))]
+
+    def solve_part1(self) -> str:
+        die, players, winner = DeterministicDie(), copy.deepcopy(self.players), None
+
+        for player in itertools.cycle(players):
+            player.move_roll(die)
+            # print(f"player {player.num} score: {player.score}")
+            if player.check_for_win():
+                winner = player
+                break
+
+        loser = players[winner.num % 2]
+
+        return f'{loser.score * die.roll_count}'
+
+    @classmethod
+    def prune_winners(cls, state_dict: Counter, winning_count: Tuple[int, int]) -> Counter:
+        # state_dict_copy = state_dict.copy()
+        to_remove = []
+        for state in state_dict:
+            if state.p1_score >= 21:
+                winning_count[0] += state_dict[state]
+                to_remove.append(state)
+            elif state.p2_score >= 21:
+                winning_count[1] += state_dict[state]
+                to_remove.append(state)
+
+        for state in to_remove:
+            del state_dict[state]
+        return state_dict
+
+    @classmethod
+    def transition_state(cls, state_dict: Counter, pnum: int):
+        state_dict_new = Counter()
+        for state in state_dict:
+            sent = state_dict[state]
+
+            for r1, r2, r3 in itertools.product(range(1, 3 + 1), repeat=3):
+                rsum = r1 + r2 + r3
+                location1, score1, location2, score2 = state
+                if pnum == 0:
+                    location1 = (-1 + rsum + location1) % 10 + 1
+                    score1 += location1
+                else:
+                    location2 = (-1 + rsum + location2) % 10 + 1
+                    score2 += location2
+
+                new_state = WorldState(location1, score1, location2, score2)
+                state_dict_new[new_state] += sent
+        return state_dict_new
+
+    def solve_part2(self) -> str:
+        p1, p2 = self.players[0], self.players[1]
+        initial_state = WorldState(p1.location, p1.score, p2.location, p2.score)
+        state_dict: Counter[WorldState, int] = Counter()
+        state_dict[initial_state] = 1
+        winning_count: List[int] = [0, 0]
+
+        for turn in range(14):
+            for player_turn in range(2):
+                state_dict = self.transition_state(state_dict, player_turn)
+                self.prune_winners(state_dict, winning_count)
+
+        return f'{max(winning_count)}'
+
+
+class NiceSlice:
+    """A class implementing the algebra of left-closed integer intervals [a, b)."""
+    def __init__(self, start: int = -inf, stop: int = inf):
+        self.__check_start_stop(start, stop)
+        self.__start = start
+        self.__stop = stop
+
+    @classmethod
+    def from_slice(cls, slc: slice) -> "NiceSlice":
+        start = slc.start if slice.start is not None else -inf
+        stop = slc.stop if slice.stop is not None else inf
+        return NiceSlice(start, stop)
+
+    @classmethod
+    def __check_start_stop(cls, start: Optional[int], stop: Optional[int]) -> None:
+        if stop < start:
+            raise ValueError(f"Stop ({stop}) should not be less than start ({start}).")
+
+
+    @property
+    def start(self):
+        return self.__start
+
+    @start.setter
+    def start(self, start: int):
+        self.__check_start_stop(start, self.stop)
+        self.__start = start
+
+    @property
+    def stop(self):
+        return self.__stop
+
+    @stop.setter
+    def stop(self, stop: int):
+        self.__check_start_stop(self.start, stop)
+        self.__stop = stop
+
+    @property
+    def is_empty(self):
+        return self.stop == self.start
+
+    @property
+    def is_singleton(self):
+        return self.start == self.stop - 1
+
+    def shift_cp(self, offset: int) -> "NiceSlice":
+        return NiceSlice(self.__start + offset, self.__stop + offset)
+
+    def disjoint(self, other: "NiceSlice") -> bool:
+        if self.stop <= other.start or other.stop <= self.start:
+            return True
+        return False
+
+    def adjacent(self, other: "NiceSlice") -> bool:
+        return self.stop == other.start or self.start == other.stop
+
+    def __or__(self, other: "NiceSlice") -> "NiceSlice":
+        if self.start <= other.start <= self.stop <= other.stop:
+            return NiceSlice(self.start, other.stop)
+        if other.start <= self.start <= other.stop <= self.stop:
+            return NiceSlice(other.start, self.stop)
+        if self <= other:
+            return other
+        if other <= self:
+            return self
+        if self.is_empty:
+            return other
+        if other.is_empty:
+            return self
+        if self.disjoint(other):
+            raise NotImplementedError("A union of disjoint NiceSlices is not a NiceSlice.")
+
+    def union(self, other: "NiceSlice") -> "NiceSlice":
+        return self | other
+
+    def __and__(self, other: "NiceSlice") -> "NiceSlice":
+        if self.start <= other.start < self.stop <= other.stop:
+            return NiceSlice(other.start, self.stop)
+        if other.start <= self.start < other.stop <= self.stop:
+            return NiceSlice(self.start, other.stop)
+        if self <= other:
+            return self
+        if other <= self:
+            return other
+        return NiceSlice(0, 0)
+
+    def intersect(self, other: "NiceSlice") -> "NiceSlice":
+        return self & other
+
+    def __eq__(self, other: "NiceSlice") -> bool:
+        return self.start == other.start and self.stop == other.stop
+
+    def __lt__(self, other: "NiceSlice") -> bool:
+        return (other.start <= self.start <= self.stop < other.stop) or (other.start < self.start <= self.stop <= other.stop)
+
+    def __le__(self, other: "NiceSlice") -> bool:
+        return other.start <= self.start <= self.stop <= other.stop
+
+    def __contains__(self, i: int) -> bool:
+        return self.start <= i < self.stop
+
+    def combine(self, other: "NiceSlice") -> "NiceSlice":
+        if not self.adjacent(other):
+            raise NotImplementedError("Can't combine non-adjacent NiceSlices.")
+        return self | other
+
+    def to_slice(self) -> slice:
+        start = None if abs(self.start) == inf else self.start
+        stop = None if abs(self.stop) == inf else self.stop
+        return slice(start, stop)
+
+    def __repr__(self) -> str:
+        return f'[{self.start} to {self.stop-1}]'
+
+
+class CubeSlice:
+    def __init__(self, on: bool, x: NiceSlice, y: NiceSlice, z: NiceSlice):
+        self.on = on
+        self.x, self.y, self.z = x, y, z
+
+    def intersects(self, other: 'CubeSlice') -> bool:
+        if self.x.disjoint(other.x) or self.y.disjoint(other.y) or self.z.disjoint(other.z):
+            return False
+        else:
+            return True
+
+    def intersect(self, other: 'CubeSlice') -> 'CubeSlice':
+        new_x = self.x.intersect(other.x)
+        new_y = self.y.intersect(other.y)
+        new_z = self.z.intersect(other.z)
+        return CubeSlice(True, new_x, new_y, new_z)
+
+    def combine(self, other: 'CubeSlice') -> bool:
+        me = [self.x, self.y, self.z]
+        them = [other.x, other.y, other.z]
+        eqs = [False]*3
+        nequal = 0
+        last_neq = None
+        for i in range(3):
+            eqs[i] = me[i] == them[i]
+            nequal += 1 if eqs[i] else 0
+            if not eqs[i]:
+                last_neq = i
+        if nequal < 2:
+            return False
+        elif nequal == 2:
+            assert last_neq is not None
+            if me[last_neq].adjacent(them[last_neq]):
+                me[last_neq] = me[last_neq].combine(them[last_neq])
+                self.x, self.y, self.z = me
+                return True
+            else:
+                return False
+        else:
+            # do nothing - they are already the same
+            return True
+
+    def __repr__(self) -> str:
+        return f"{'on' if self.on else 'off'} " \
+               f'x={self.x.start}..{self.x.stop-1},' \
+               f'y={self.y.start}..{self.y.stop-1},' \
+               f'z={self.z.start}..{self.z.stop-1}'
+
+    def __eq__(self, other: "NiceSlice") -> bool:
+        return self.on == other.on and \
+               self.x == other.x and self.y == other.y and self.z == other.z
+
+
+class Cube:
+    def __init__(self):
+        self.regions: List[CubeSlice] = []
+
+    @classmethod
+    def add_or_combine(cls, test_region: CubeSlice, regions: List[CubeSlice]):
+        for region in regions:
+            if region.combine(test_region):
+                return
+
+        regions.append(test_region)
+
+    @classmethod
+    def get_regions_product(cls, test_region: CubeSlice, interx: CubeSlice):
+        ix, iy, iz = interx.x, interx.y, interx.z
+        xr, yr, zr = [], [], []
+        if test_region.x.start < ix.start:
+            xr.append(NiceSlice(test_region.x.start, ix.start))
+        if test_region.y.start < iy.start:
+            yr.append(NiceSlice(test_region.y.start, iy.start))
+        if test_region.z.start < iz.start:
+            zr.append(NiceSlice(test_region.z.start, iz.start))
+        xr.append(ix)
+        yr.append(iy)
+        zr.append(iz)
+        if ix.stop < test_region.x.stop:
+            xr.append(NiceSlice(ix.stop, test_region.x.stop))
+        if iy.stop < test_region.y.stop:
+            yr.append(NiceSlice(iy.stop, test_region.y.stop))
+        if iz.stop < test_region.z.stop:
+            zr.append(NiceSlice(iz.stop, test_region.z.stop))
+
+        return itertools.product(xr, yr, zr)
+
+    def add_or_split(self, test_regions: List[CubeSlice]) -> Tuple[List[CubeSlice],List[CubeSlice]]:
+        new_tests = []
+        to_add = []
+        for test_region in test_regions:
+            disjoint = True
+            for region in self.regions:
+                if region.intersects(test_region):
+                    disjoint = False
+                    interx = region.intersect(test_region)
+                    if test_region == interx:
+                        # if same as the intersect, this is a proper subset - break
+                        break
+
+                    # otherwise, check for parts hanging off and add them
+                    for x, y, z in self.get_regions_product(test_region, interx):
+                        split_cube = CubeSlice(True, x, y, z)
+                        if not split_cube.intersects(region):
+                            self.add_or_combine(split_cube, new_tests)
+                    break
+
+            if disjoint:
+                self.add_or_combine(test_region, to_add)
+
+        return new_tests, to_add
+
+    def add_region(self, to_add: CubeSlice) -> None:
+        if to_add.on:
+            test_regions = [to_add]
+            while len(test_regions) > 0:
+                test_regions, add_list = self.add_or_split(test_regions)
+                self.regions.extend(add_list)
+        else:
+            new_regions = []
+            for region in self.regions:
+                if region.intersects(to_add):
+                    interx = region.intersect(to_add)
+                    if region == interx:
+                        # we are turning the whole thing off, i.e. don't add it to the new
+                        continue
+
+                    for x, y, z in self.get_regions_product(region, interx):
+                        split_cube = CubeSlice(True, x, y, z)
+                        if split_cube != interx:
+                            self.add_or_combine(split_cube, new_regions)
+                else:
+                    new_regions.append(region)
+
+            self.regions = new_regions
+
+    def get_total_volume(self) -> int:
+        tsum = 0
+        for region in self.regions:
+            # TODO: add this to NiceSlice
+            xd = region.x.stop - region.x.start
+            yd = region.y.stop - region.y.start
+            zd = region.z.stop - region.z.start
+            tsum += xd*yd*zd
+
+        return tsum
+
+class Day22(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('')
+        reactor_file = 'day22_test.txt' if test else 'day22_reactor.txt'
+        reactor_lines = open(reactor_file, 'r').readlines()
+
+        self.slices = []
+
+        for reactor_line in reactor_lines:
+            on_str, slices_str = reactor_line.strip().split(' ')
+            x_str, y_str, z_str = slices_str.split(',')
+            x_strs = x_str.split('=')[1].split('..')
+            y_strs = y_str.split('=')[1].split('..')
+            z_strs = z_str.split('=')[1].split('..')
+            x = NiceSlice(int(x_strs[0]), int(x_strs[1])+1)
+            y = NiceSlice(int(y_strs[0]), int(y_strs[1])+1)
+            z = NiceSlice(int(z_strs[0]), int(z_strs[1])+1)
+            self.slices.append(CubeSlice(on_str == 'on', x, y, z))
+
+    def solve_part1(self) -> str:
+        region = np.zeros((101, 101, 101), dtype=bool)
+        for slc in self.slices:
+            xo, yo, zo = slc.x.shift_cp(50), slc.y.shift_cp(50), slc.z.shift_cp(50)
+            region[xo.to_slice(), yo.to_slice(), zo.to_slice()] = slc.on
+        return f'{np.sum(region)}'
+
+    def solve_part2(self) -> str:
+        cube = Cube()
+        for test_region in self.slices:
+            cube.add_region(test_region)
+
+        return f'{cube.get_total_volume()}'
+
+class Amphipod:
+    def __init__(self, atype: str, row: int, column: int):
+        assert 'A' <= atype <= 'D'
+        self.ntype = ord(atype) - ord('A')
+        self.row = row
+        self.column = column
+
+    def get_correct_room_col(self) -> int:
+        return self.ntype * 2 + 3
+
+    def in_correct_room(self) -> bool:
+        return self.row != 1 and self.column == self.get_correct_room_col()
+
+    def __repr__(self) -> str:
+        return f"{chr(self.ntype + ord('A'))} [{self.row},{self.column}]"
+
+    def __eq__(self, other: 'Amphipod') -> bool:
+        return self.ntype == other.ntype & self.row == other.row & self.column == other.column
+
+    def __hash__(self):
+        return hash((self.ntype, self.row, self.column))
+
+class AmphipodState:
+    def __init__(self, amphipods: List[Amphipod], cost: int = 0, nrows: int = 2):
+        self.amphipods = amphipods
+        self.cost = cost
+        self.nrows = nrows
+        self.moves: Set['AmphipodState'] = None
+        self.cell_repr = np.zeros((nrows+3,13),dtype=int)
+        self.cell_repr[1, 1:12] = 1
+        self.cell_repr[3:3+nrows, 0:2] = -1
+        self.cell_repr[3:3+nrows, 11:13] = -1
+        for i in range(4):
+            self.cell_repr[2:2+nrows, 2 * i + 3] = 1
+        for amphipod in self.amphipods:
+            self.cell_repr[amphipod.row, amphipod.column] = amphipod.ntype + 2
+
+    def check_for_win(self) -> bool:
+        won = True
+        for amphipod in self.amphipods:
+            if not amphipod.in_correct_room():
+                won = False
+                break
+        return won
+
+    def get_cell_repr(self) -> np.ndarray:
+        return self.cell_repr
+
+    def construct_moves(self) -> Set['AmphipodState']:
+        moves = set()
+        hallway = self.cell_repr[1, :]
+
+        for anum, amphipod in enumerate(self.amphipods):
+            room_above = self.cell_repr[2:amphipod.row, amphipod.column]
+            my_room_col = amphipod.get_correct_room_col()
+            my_room_vals = self.cell_repr[2:2+self.nrows, my_room_col]
+            if not np.all(room_above == 1):
+                # can't get out
+                continue
+
+            full_spaces = my_room_vals != 1
+            wrong_spaces = np.logical_and(my_room_vals != amphipod.ntype + 2, full_spaces)
+
+            if amphipod.column == my_room_col and not np.any(wrong_spaces):
+                # we are looking good - no need to keep going
+                continue
+
+            # check if we can move back into our room
+            if not np.any(wrong_spaces):
+                # maybe we can!
+                # first check if the hallway on the way there is empty
+                start_from = amphipod.column + np.sign(my_room_col - amphipod.column)
+                slc = slice(min(start_from, my_room_col), max(start_from, my_room_col) + 1)
+
+                if np.all(hallway[slc] == 1):
+                    # the hallway IS empty! now let's go into the deepest place we can
+                    my_room_depth = np.max(np.where(np.logical_not(full_spaces)))+1
+                    slclen = slc.stop - slc.start
+                    new_cost = self.cost + (slclen + my_room_depth) * 10 ** amphipod.ntype
+                    if amphipod.row != 1:  # in a room; add cost to get to hallway
+                        to_hallway = amphipod.row - 1
+                        new_cost += to_hallway * 10 ** amphipod.ntype
+                    new_pods = copy.deepcopy(self.amphipods)
+                    mover = new_pods[anum]
+                    mover.row = 1 + my_room_depth
+                    mover.column = my_room_col
+                    moves.add(AmphipodState(new_pods, new_cost, self.nrows))
+                    continue
+
+            if amphipod.row != 1:  # room->hallway
+                for hall_spot in [1, 2, 4, 6, 8, 10, 11]:
+                    slc = slice(min(amphipod.column, hall_spot), max(amphipod.column,
+                                                                     hall_spot) + 1)
+
+                    # invalid_spot = False
+                    # if hall_spot in [4, 6, 8]:
+                    #     # we would go in the hallway which can block other moves. If any of those
+                    #     # would ultimately prevent us from getting into our room, we should not move
+                    #     # there
+                    #     for squatter in my_room_vals:
+                    #         if squatter != 1:
+                    #             correct_column = (squatter - 2) * 2 + 3
+                    #             slc2 = slice(min(correct_column, my_room_col),
+                    #                          max(correct_column, my_room_col) + 1)
+                    #
+                    #             if slc2.start <= hall_spot < slc2.stop:
+                    #                 invalid_spot = True
+                    #                 break
+                    #
+                    # if invalid_spot:
+                    #     continue
+
+                    # okay, we can proceed. check if the hallway is open
+                    if np.all(hallway[slc] == 1):
+                        # it is open!
+                        slclen = slc.stop - slc.start
+                        new_cost = self.cost + (amphipod.row - 2 + slclen) * 10 ** amphipod.ntype
+                        new_pods = copy.deepcopy(self.amphipods)
+                        mover = new_pods[anum]
+                        mover.row = 1
+                        mover.column = hall_spot
+                        moves.add(AmphipodState(new_pods, new_cost, self.nrows))
+
+        return moves
+
+    def get_moves(self) -> Set['AmphipodState']:
+        if self.moves is None:
+            self.moves = self.construct_moves()
+        return self.moves
+
+    def __lt__(self, other: 'AmphipodState'):
+        return self.cost < other.cost
+
+    def __eq__(self, other: 'AmphipodState'):
+        return np.all(self.cell_repr == other.cell_repr)
+
+    def __hash__(self):
+        return hash(self.cost) ^ hash(tuple(self.amphipods))
+
+    def __repr__(self):
+        ret_val = ''
+        plotter = {0: '#', -1: ' ', 1: '.', 2: 'A', 3: 'B', 4: 'C', 5:'D'}
+        for i in range(self.cell_repr.shape[0]):
+            for j in range(self.cell_repr.shape[1]):
+                ret_val += plotter[self.cell_repr[i,j]]
+            ret_val += '\n'
+        return ret_val
+
+    @classmethod
+    def from_file(cls, amphipod_file) -> 'AmphipodState':
+        amphipod_lines = open(amphipod_file, 'r').readlines()
+
+        amphipods = []
+        for line_num, amphipod_line in enumerate(amphipod_lines):
+            amphipod_line = amphipod_line.strip()
+            if line_num in [2,3]:
+                types = [x for x in amphipod_line.split('#') if len(x) > 0]
+                for i, atype in enumerate(types):
+                    amphipods.append(Amphipod(atype, line_num, 2*i+3))
+
+        return AmphipodState(amphipods)
+
+    def heuristic_distance_to_go(self):
+        ncorrect = [0] * 4
+
+        dist = 0
+
+        # count the number of correct per room
+        for ntype in range(0, 4):
+            room_vals = self.cell_repr[2:2+self.nrows, 2 * ntype + 3] - 2
+            for room_val in room_vals[::-1]:
+                if room_val == ntype:
+                    ncorrect[ntype] += 1
+                else:
+                    break
+
+        min_moves = [0]*4
+
+        # assume no one is blocking each other, and just sum up the distance to go
+        for amphipod in self.amphipods:
+            my_room_col = amphipod.get_correct_room_col()
+            my_room_vals = self.cell_repr[2:2+self.nrows, my_room_col]
+
+            full_spaces = my_room_vals != 1
+            wrong_spaces = np.logical_and(my_room_vals != amphipod.ntype + 2, full_spaces)
+
+            diff = abs(amphipod.column - amphipod.get_correct_room_col())
+
+            if amphipod.row == 1:
+                min_moves[amphipod.ntype] += diff + 1
+            elif diff != 0:
+                # in a room but the wrong one - need row - 1 + diff + 1 spaces to get to my room
+                min_moves[amphipod.ntype] += amphipod.row - 1 + diff + 1
+            elif np.any(wrong_spaces):
+                room_below = self.cell_repr[amphipod.row+1:2+self.nrows, amphipod.column]
+                if np.any(room_below != amphipod.ntype + 2):
+                    # in our own room but someone else is below us
+                    # we'll need to at a minimum step aside, let them out, then come back in
+                    min_moves[amphipod.ntype] += amphipod.row - 1 + 3
+
+        # now update the min_moves to reflect the number wrong
+        for ntype in range(0,4):
+            if ncorrect[ntype] < self.nrows - 1:
+                for i in range(self.nrows - ncorrect[ntype] - 1):
+                    min_moves[ntype] += i+1
+            dist += min_moves[ntype]*10**ntype
+
+        return dist
+
+
+class AmphipodBurrow:
+    def __init__(self):
+        self.winning_costs = set()
+
+    def transition(self, old_states: Set['AmphipodState']) -> Tuple[Set['AmphipodState'], int]:
+
+        new_states = set()
+        for old_state in old_states:
+            if old_state.check_for_win():
+                self.winning_costs.add(old_state.cost)
+                continue
+            else:
+                new_states |= old_state.get_moves()
+
+        return new_states
+
+    def get_minimum_path_cost(self, start: AmphipodState, end: AmphipodState) -> int:
+        state = start
+        priority_queue = []
+        best_cost: Dict[AmphipodState, int] = dict()
+
+        niter = 0
+        while state != end:
+            for state_ in state.get_moves():
+                cost_ = state_.cost + state_.heuristic_distance_to_go()
+                if state_ in best_cost and best_cost[state_] <= cost_:
+                    continue
+                best_cost[state_] = cost_ # min(best_cost.get(state, cost_), cost_)
+                heapq.heappush(priority_queue, (cost_, state_))
+            cost, state = heapq.heappop(priority_queue)
+            niter += 1
+            if niter % 10000 == 0:
+                print(f'Iter {niter}, fringe size currently {len(priority_queue)}, cost: {cost}, State:\n{state}')
+
+        return state.cost
+
+
+class Day23(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('Amphipod burrow solver')
+        amphipod_file = 'day23_test.txt' if test else 'day23_amphipod.txt'
+        self.start_state = AmphipodState.from_file(amphipod_file)
+        self.end_state = AmphipodState.from_file('day23_end.txt')
+
+    def solve_part1(self) -> str:
+        burrow = AmphipodBurrow()
+        cost = burrow.get_minimum_path_cost(self.start_state, self.end_state)
+
+        return f'{cost}'
+
+    def solve_part2(self) -> str:
+        burrow = AmphipodBurrow()
+        start_pods = copy.deepcopy(self.start_state.amphipods)
+        for amphipod in start_pods:
+            if amphipod.row > 2:
+                amphipod.row += 2
+
+        end_pods = copy.deepcopy(self.end_state.amphipods)
+        for amphipod in end_pods:
+            if amphipod.row > 2:
+                amphipod.row += 2
+
+        new_vals = [['D','C','B','A'],['D','B','A','C']]
+
+        for i in range(4):
+            for j in range(2):
+                start_pods.append(Amphipod(new_vals[j][i], j+3, 2*i + 3))
+                end_pods.append(Amphipod(chr(i + ord('A')), j+3, 2*i + 3))
+
+        start_state = AmphipodState(start_pods, nrows=4)
+        end_state = AmphipodState(end_pods, nrows=4)
+
+        cost = burrow.get_minimum_path_cost(start_state, end_state)
+
+        return f'{cost}'
+
+
+ALU = namedtuple('ALU', ['w', 'x', 'y', 'z'])
+
+
+class MonadOp:
+    def __init(self, left: Optional['MonadOp'], right: Optional['MonadOp'], op: str,
+               val: Optional[int]):
+
+        self.left = left
+        self.right = right
+        self.op = op
+        self.val = val
+
+    def operate(self, values: Dict[str, Any]) -> int:
+        if self.op == 'literal':
+            assert self.val is not None
+            return eval(self.val, values)
+        else:
+            assert self.left is not None and self.right is not None
+            if self.op == 'add':
+                return self.left.operate(values) + self.right.operate(values)
+            elif self.op == 'mul':
+                return self.left.operate(values) * self.right.operate(values)
+            elif self.op == 'div':
+                return self.left.operate(values) // self.right.operate(values)
+            elif self.op == 'mod':
+                return self.left.operate(values) % self.right.operate(values)
+            elif self.op == 'eql':
+                lval, rval = self.left.operate(values), self.right.operate(values)
+                return 1 if lval == rval else 0
+
+
+class MonadBlock:
+    def __init__(self, block_num: int, input_var: str):
+        self.lines = []
+        self.num = block_num
+        self.input_var = input_var
+        self.depends = {}
+        self.consts = []
+
+    def parse(self):
+        for num, line in enumerate(self.lines):
+            tok = line.split(' ')
+            if num in [3, 4, 14]:
+                self.consts.append(int(tok[2]))
+
+    @classmethod
+    def check_int(cls, tok: str) -> bool:
+        if tok is None or len(tok) == 0:
+            return False
+        if tok[0] in ('-', '+'):
+            return tok[1:].isdigit()
+        return tok.isdigit()
+
+    @classmethod
+    def get_val(cls, tok: str, localvals: Dict[str, int]) -> int:
+        if cls.check_int(tok):
+            return int(tok)
+        else:
+            return localvals[tok]
+
+    def compute_forward(self, w_val: int, z_val: int) -> int:
+         localvals = {'w': w_val, 'x': 0, 'y': 0, 'z': z_val}
+         for line in self.lines:
+             tok = line.split(' ')
+             if tok[0] == 'add':
+                 a, b = tok[1:3]
+                 localvals[a] = localvals[a] + self.get_val(b, localvals)
+             elif tok[0] == 'mul':
+                 a, b = tok[1:3]
+                 localvals[a] = localvals[a] * self.get_val(b, localvals)
+             elif tok[0] == 'div':
+                 a, b = tok[1:3]
+                 localvals[a] = localvals[a] // self.get_val(b, localvals)
+             elif tok[0] == 'mod':
+                 a, b = tok[1:3]
+                 localvals[a] = localvals[a] % self.get_val(b, localvals)
+             elif tok[0] == 'eql':
+                 a, b = tok[1:3]
+                 localvals[a] = 1 if localvals[a] == self.get_val(b, localvals) else 0
+             else:
+                 raise ValueError(f'Invalid token {tok[0]}')
+
+         return localvals['z']
+
+    def compute_simplified(self, w: int, z: int) -> int:
+        # compute the simplified version of the MONAD tree (based on staring at it for a long time)
+        a, b, c = self.consts[0:3]
+        if z % 26 + b == w:
+            return z // a
+        else:
+            return 26*(z // a) + w + c
+
+
+class Day24(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('')
+        # load the monad file
+        monad_file = 'day24_test.txt' if test else 'day24_monad.txt'
+        monad_lines = open(monad_file, 'r').readlines()
+        block_num = -1
+        self.monad_blocks = []
+        current_block = None
+        for monad_line in monad_lines:
+            tok = monad_line.strip().split(' ')
+            if tok[0] == 'inp':
+                block_num += 1
+                current_block = MonadBlock(block_num, tok[1])
+                self.monad_blocks.append(current_block)
+            else:
+                current_block.lines.append(monad_line.strip())
+
+        # parse the blocks to yoink the 3 constants: a, b, and c
+        for monad_block in self.monad_blocks:
+            monad_block.parse()
+
+        nblocks = len(self.monad_blocks)
+
+        # the z values that are possible during each step
+        self.possible_zs_dict: Dict[int, Set[int]] = {nblocks: [0]}
+
+        # run through in reverse order and get the z values that are possible
+        last_possible_zs = {0}
+        for block in self.monad_blocks[::-1]:
+            a, b, c = block.consts[0:3]
+            next_possible_zs = set()
+            if a == 26 and b < 10:
+                # need to hit case 1 whenever possible to ensure start/end z = 0
+                # new_z needs to be such that new_z // 26 in possible_zs and new_z % 26 = w - b
+                for possible_z in last_possible_zs:
+                    for w in range(1,9+1):
+                        z_p = w - b
+                        if 0 <= z_p <= 25:
+                            next_possible_zs.add(z_p + 26*possible_z)
+            else:
+                assert a == 1 and b >= 10
+                # will hit case 2
+                #    return 26 * z + w + c # case 2
+                # new_z needs to be such that 26*new_z + w + c in possible_zs
+                for possible_z in last_possible_zs:
+                    for w in range(1, 9+1):
+                        # 26*new_z + w + c == possible_z
+                        new_z = (possible_z - w - c)//26
+                        if 26*new_z + w + c == possible_z: # this is necessary (?)
+                            next_possible_zs.add(new_z)
+
+            print(f'At step {block.num}, there are {len(next_possible_zs)} z possibilities')
+            self.possible_zs_dict[block.num] = next_possible_zs
+            last_possible_zs = next_possible_zs
+
+    def solve_part1(self) -> str:
+        # now walk the path with the largest possible w such that the corresponding z is possible
+        last_z = 0
+        max_wzs = []
+        for block in self.monad_blocks:
+            max_wz_candidate = (0,0)
+            valid_zs = self.possible_zs_dict[block.num+1]
+            for w in range(1,10):
+                new_z = block.compute_simplified(w, last_z)
+                if new_z in valid_zs:
+                    max_wz_candidate = (w, new_z)
+            last_z = max_wz_candidate[1]
+            max_wzs.append(max_wz_candidate)
+
+        return f"{''.join([str(x[0]) for x in max_wzs])}"
+
+    def solve_part2(self) -> str:
+        last_z = 0
+        min_wzs = []
+        for block in self.monad_blocks:
+            min_wz_candidate = (0,0)
+            valid_zs = self.possible_zs_dict[block.num+1]
+            for w in range(9,0,-1):
+                new_z = block.compute_simplified(w, last_z)
+                if new_z in valid_zs:
+                    min_wz_candidate = (w, new_z)
+            last_z = min_wz_candidate[1]
+            min_wzs.append(min_wz_candidate)
+
+        return f"{''.join([str(x[0]) for x in min_wzs])}"
+
+
+class Day25(AdventProblem):
+    def __init__(self, test: bool):
+        super().__init__('')
+
+        pass
+
+    def solve_part1(self) -> str:
+        return f''
+
+    def solve_part2(self) -> str:
+        return f''
 
 
 def run_day(day: int, test: bool) -> None:
@@ -969,7 +2334,6 @@ def run_day(day: int, test: bool) -> None:
     print(f'Part 1 ({time3 - time2:.4f} s) - {part1}')
     part2, time4 = instance.solve_part2(), time.time()
     print(f'Part 2 ({time4 - time3:.4f} s) - {part2}')
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("advent.py")
