@@ -1255,31 +1255,6 @@ class Scanner:
         # self.dist_mat = distance_matrix(self.beacons, self.beacons)
         self.offset = np.array([0,0,0])
 
-    def check_for_consistent_offset(self, other: 'Scanner', rotation: np.ndarray) -> Tuple[bool, np.ndarray]:
-        rot_beacons = (rotation @ other.beacons.T).T
-        offset_map = {}
-
-        for i in range(self.beacons.shape[0]):
-            offsets = rot_beacons - self.beacons[i, :]
-            for offset_num in range(offsets.shape[0]):
-                offset = tuple(offsets[offset_num, :])
-                if offset not in offset_map:
-                    offset_map[offset] = 0
-                offset_map[offset] += 1
-
-        # get out the counts, see if any are more than 12
-        list_vals = list(offset_map.values())
-        list_inds = list(offset_map)
-        correct_inds = np.where(np.array(list_vals) >= 12)
-        if len(correct_inds) > 1:
-            raise Exception('double inds!')
-        correct_ind = correct_inds[0]
-        found_offset = len(correct_ind) > 0
-        correct_offset = list_inds[correct_ind[0]] if found_offset else None
-        if found_offset:
-            other.offset = np.array(correct_offset)
-        return found_offset, correct_offset
-
     def add_new_points(self, other: 'Scanner', offset: np.ndarray, rotation: ScannerRotation):
         rot_and_trans = rotation.rotate(other.beacons) - offset
         blist = self.beacons.tolist()
