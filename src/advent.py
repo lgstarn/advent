@@ -14,6 +14,7 @@ import networkx as netx
 import numpy as np
 from scipy.signal import convolve2d
 from scipy.spatial import KDTree
+from scipy.spatial.distance import cdist
 
 
 class AdventProblem(ABC):
@@ -1231,7 +1232,7 @@ class ScannerRotation:
 
     def rotate(self, points: np.ndarray) -> np.ndarray:
         # permute the columns
-        new_array = points[:, self.permutation]
+        new_array = np.copy(points[:, self.permutation])
         # flip the signs
         new_array[:,0] *= self.x_sign
         new_array[:,1] *= self.y_sign
@@ -1279,12 +1280,10 @@ class Scanner:
             other.offset = np.array(correct_offset)
         return found_offset, correct_offset
 
-    def add_new_points(self, other: 'Scanner', offset: np.ndarray, rotation: np.ndarray):
-        rot_and_trans = (rotation @ other.beacons.T).T - offset
-        to_include = []
-        for ii,point in enumerate(rot_and_trans):
-            contains = list(point) in self.beacons.tolist()
-            to_include.append(not contains)
+    def add_new_points(self, other: 'Scanner', offset: np.ndarray, rotation: ScannerRotation):
+        rot_and_trans = rotation.rotate(other.beacons) - offset
+        blist = self.beacons.tolist()
+        to_include = [list(point) not in blist for point in rot_and_trans]
         self.beacons = np.append(self.beacons, rot_and_trans[to_include,:], axis=0)
 
     def __repr__(self):
@@ -1314,6 +1313,12 @@ class Day19(AdventProblem):
             self.scanners.append(Scanner(len(self.scanners), scanner))
         self.to_check = None
 
+        self.rotations = []
+
+        for x_flip, y_flip, z_flip in itertools.product([False, True], repeat=3):
+            for permutation in itertools.permutations(range(3)):
+                self.rotations.append(ScannerRotation(x_flip, y_flip, z_flip, permutation))
+
     def largest_distance(self):
         maxdist = -np.inf
         for ii,x in enumerate(self.scanners):
@@ -1321,33 +1326,38 @@ class Day19(AdventProblem):
                 maxdist = max(np.linalg.norm(x.offset-y.offset,ord=1),maxdist)
         return maxdist
 
-    @classmethod
-    def run_icp(cls, target: Scanner, other: Scanner) -> Tuple[bool, np.ndarray, np.ndarray]:
-        steps, converged = 0, False
-        target_kdt = KDTree(target.beacons)
-        offset, rotation = np.array([0, 0, 0]), ScannerRotation(False, False, False, [0,1,2])
-        rot_trans_beacons = other.beacons
-        while not converged and steps < 5:
-            _, inds = target_kdt.query(rot_trans_beacons, p=1)
-            # centroid = np.round(np.mean(diff, axis=0))
-            for x_flip, y_flip, z_flip in itertools.product([False, True], repeat=3):
-                for permutation in itertools.permutations(range(3)):
-                    new_rotation = ScannerRotation(x_flip, y_flip, z_flip, permutation)
-                    # new_beacons = new_rotation.rotate(rot_trans_beacons) - centroid
-                    # new_diff = target.beacons[inds, :] - new_beacons
-            # find the rotation that minimizes the distance
-            steps += 1
-        pass
-
-    @classmethod
-    def scan_list(cls, target: Scanner, to_be_scanned: Set[Scanner]) -> Set[Scanner]:
+    def scan_list(self, target: Scanner, to_be_scanned: Set[Scanner]) -> Set[Scanner]:
         to_remove = set()
 
         for scanner in to_be_scanned:
-            converged, offset, rotation = cls.run_icp(target, scanner)
-            if converged:
-                target.add_new_points(scanner, offset, rotation)
-                to_remove |= {scanner}
+            for rotation in self.rotations:
+                test_beacons = rotation.rotate(scanner.beacons)
+                dist_mat = np.round(cdist(test_beacons, target.beacons, 'cityblock')).astype('int')
+                unique_vals, counts = np.unique(dist_mat,return_counts='True')
+
+                point_found = False
+
+                for dval in np.unique(counts)[::-1]:
+                    if dval < 12:
+                        break
+                    # check if this possible distance has 12 of the same offset
+                    offsets_dict = Counter()
+                    dist_inds = np.where(dist_mat == unique_vals[np.where(counts == dval)])
+                    for i in range(len(dist_inds[0])):
+                        offset = tuple(test_beacons[dist_inds[0][i]] - target.beacons[dist_inds[1][i]])
+                        offsets_dict[offset] += 1
+                    point_found = False
+                    for val in offsets_dict:
+                        if offsets_dict[val] >= 12:
+                            target.add_new_points(scanner, val, rotation)
+                            scanner.offset = np.array(val)
+                            to_remove |= {scanner}
+                            point_found = True
+                            break
+                    if point_found:
+                        break
+                if point_found:
+                    break
 
         return to_be_scanned - to_remove
 
@@ -1357,8 +1367,6 @@ class Day19(AdventProblem):
 
         while len(to_scan) > 0:
             to_scan = self.scan_list(to_check, to_scan)
-
-        self.to_check = to_check
 
         return f'{to_check.beacons.shape[0]}'
 
@@ -1644,6 +1652,9 @@ class NiceSlice:
     def __le__(self, other: "NiceSlice") -> bool:
         return other.start <= self.start <= self.stop <= other.stop
 
+    def __len__(self) -> int:
+        return self.stop - self.start
+
     def __contains__(self, i: int) -> bool:
         return self.start <= i < self.stop
 
@@ -1709,7 +1720,7 @@ class CubeSlice:
                f'y={self.y.start}..{self.y.stop-1},' \
                f'z={self.z.start}..{self.z.stop-1}'
 
-    def __eq__(self, other: "NiceSlice") -> bool:
+    def __eq__(self, other: 'CubeSlice') -> bool:
         return self.on == other.on and \
                self.x == other.x and self.y == other.y and self.z == other.z
 
@@ -1800,17 +1811,13 @@ class Cube:
     def get_total_volume(self) -> int:
         tsum = 0
         for region in self.regions:
-            # TODO: add this to NiceSlice
-            xd = region.x.stop - region.x.start
-            yd = region.y.stop - region.y.start
-            zd = region.z.stop - region.z.start
-            tsum += xd*yd*zd
+            tsum += len(region.x)*len(region.y)*len(region.z)
 
         return tsum
 
 class Day22(AdventProblem):
     def __init__(self, test: bool):
-        super().__init__('')
+        super().__init__('Reactor cubes')
         reactor_file = 'day22_test.txt' if test else 'day22_reactor.txt'
         reactor_lines = open(reactor_file, 'r').readlines()
 
@@ -1840,6 +1847,7 @@ class Day22(AdventProblem):
             cube.add_region(test_region)
 
         return f'{cube.get_total_volume()}'
+
 
 class Amphipod:
     def __init__(self, atype: str, row: int, column: int):
@@ -2067,7 +2075,8 @@ class AmphipodBurrow:
 
         return new_states
 
-    def get_minimum_path_cost(self, start: AmphipodState, end: AmphipodState) -> int:
+    @staticmethod
+    def get_minimum_path_cost(start: AmphipodState, end: AmphipodState) -> int:
         state = start
         priority_queue = []
         best_cost: Dict[AmphipodState, int] = dict()
@@ -2223,7 +2232,7 @@ class MonadBlock:
 
 class Day24(AdventProblem):
     def __init__(self, test: bool):
-        super().__init__('')
+        super().__init__('MONAD on the ALU')
         # load the monad file
         monad_file = 'day24_test.txt' if test else 'day24_monad.txt'
         monad_lines = open(monad_file, 'r').readlines()
@@ -2273,7 +2282,7 @@ class Day24(AdventProblem):
                         if 26*new_z + w + c == possible_z: # this is necessary (?)
                             next_possible_zs.add(new_z)
 
-            print(f'At step {block.num}, there are {len(next_possible_zs)} z possibilities')
+            # print(f'At step {block.num}, there are {len(next_possible_zs)} z possibilities')
             self.possible_zs_dict[block.num] = next_possible_zs
             last_possible_zs = next_possible_zs
 
@@ -2345,4 +2354,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    run_day(args.day, args.test)
+    if int(args.day) < 0:
+        for day in range(1,25+1):
+            run_day(day, args.test)
+    else:
+        run_day(args.day, args.test)
